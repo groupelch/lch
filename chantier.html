@@ -1,0 +1,1188 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>ChantierPro – LCH Group</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#080a0f;font-family:'DM Sans',sans-serif;color:#e8ecf4;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:#10131a;}
+::-webkit-scrollbar-thumb{background:#1e2540;border-radius:3px;}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.5);}
+select option{background:#10131a;color:#e8ecf4;}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ── Supabase ─────────────────────────────────────────────────── */
+const SUPA_URL = 'https://tnxpiymffegmadwkharl.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRueHBpeW1mZmVnbWFkd2toYXJsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3MjA5NDcsImV4cCI6MjA5MTI5Njk0N30.We8LOLSxq9bXQrWnTe_OafA5NjXa_4T2pvyvt8yd8w8';
+const sb = supabase.createClient(SUPA_URL, SUPA_KEY);
+
+/* ── Helpers ──────────────────────────────────────────────────── */
+const uid = () => Math.random().toString(36).slice(2,11);
+const fmtDate = d => d ? new Date(d).toLocaleDateString('fr-FR',{day:'2-digit',month:'short'}) : '—';
+const fmtMoney = n => new Intl.NumberFormat('fr-FR',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(n||0);
+const initials = n => (n||'').split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2)||'??';
+const AV_COLORS = ['#06b6d4','#f59e0b','#8b5cf6','#10b981','#f43f5e','#3b82f6','#ec4899','#84cc16'];
+
+/* ── DB layer ─────────────────────────────────────────────────── */
+const DB = {
+  /* CHANTIERS */
+  async listChantiers() {
+    const {data,error} = await sb.from('chantiers').select('*').order('created_at',{ascending:false});
+    if(error) throw error;
+    return data||[];
+  },
+  async createChantier(d) {
+    const {data,error} = await sb.from('chantiers').insert({
+      id:uid(),nom:d.nom,adresse:d.adresse||'',client:d.client||'',
+      date_debut:d.dateDebut||null,date_fin:d.dateFin||null,
+      budget:Number(d.budget)||0,statut:'planifie',avancement:0
+    }).select().single();
+    if(error) throw error; return data;
+  },
+
+  /* CHANTIER DETAIL */
+  async getChantierDetail(chantierId) {
+    const {data:sections} = await sb.from('sections').select('*').eq('chantier_id',chantierId).order('position');
+    if(!sections?.length) return {sections:[],taches:[],assignations:[],achats:[],etats:[],commentaires:[]};
+    const sIds = sections.map(s=>s.id);
+    const {data:taches} = await sb.from('taches').select('*').in('section_id',sIds).order('position');
+    if(!taches?.length) return {sections,taches:[],assignations:[],achats:[],etats:[],commentaires:[]};
+    const tIds = taches.map(t=>t.id);
+    const [asgn,acht,etat,comm] = await Promise.all([
+      sb.from('assignations').select('*').in('tache_id',tIds),
+      sb.from('achats').select('*').in('tache_id',tIds),
+      sb.from('etats').select('*').in('tache_id',tIds),
+      sb.from('commentaires').select('*').in('tache_id',tIds).order('created_at'),
+    ]);
+    return {sections,taches:taches||[],assignations:asgn.data||[],achats:acht.data||[],etats:etat.data||[],commentaires:comm.data||[]};
+  },
+
+  /* INTERVENANTS */
+  async listIntervenants() {
+    const {data} = await sb.from('intervenants').select('*');
+    return data||[];
+  },
+  async createIntervenant(d) {
+    const {data,error} = await sb.from('intervenants').insert({
+      id:uid(),label:d.nom,initiales:initials(d.nom),
+      couleur:d.color,bg:`${d.color}22`,metier:d.metier||'',tel:d.tel||'',entreprise:d.entreprise||''
+    }).select().single();
+    if(error) throw error; return data;
+  },
+
+  /* SECTIONS */
+  async getOrCreateSection(chantierId, label, existing) {
+    const found = existing.find(s=>s.label.toLowerCase()===label.toLowerCase());
+    if(found) return found;
+    const {data,error} = await sb.from('sections').insert({id:uid(),chantier_id:chantierId,label,couleur:'#f59e0b',position:existing.length}).select().single();
+    if(error) throw error; return data;
+  },
+
+  /* TACHES */
+  async createTache(sectionId, d, artisanId) {
+    const id = uid();
+    const {error} = await sb.from('taches').insert({
+      id,section_id:sectionId,texte:d.titre,description:d.description||'',
+      duree:Number(d.duree)||1,date_debut:d.dateDebut||null,date_butoir:d.dateFin||null,
+      priorite:d.priorite||'normale',statut:'planifie',position:0
+    });
+    if(error) throw error;
+    await sb.from('etats').insert({tache_id:id,done:false});
+    if(artisanId) await sb.from('assignations').insert({tache_id:id,intervenant_id:artisanId});
+    return id;
+  },
+  async updateTache(id, d, artisanId) {
+    await sb.from('taches').update({
+      texte:d.titre,description:d.description,duree:d.duree,
+      date_debut:d.dateDebut||null,date_butoir:d.dateFin||null,
+      priorite:d.priorite,statut:d.statut
+    }).eq('id',id);
+    if(artisanId !== undefined) {
+      await sb.from('assignations').delete().eq('tache_id',id);
+      if(artisanId) await sb.from('assignations').insert({tache_id:id,intervenant_id:artisanId});
+    }
+    await sb.from('etats').upsert({tache_id:id,done:d.statut==='valide'});
+  },
+
+  /* COMMENTAIRES */
+  async addCommentaire(tacheId, texte) {
+    const {data,error} = await sb.from('commentaires').insert({id:uid(),tache_id:tacheId,texte,auteur:'Louis'}).select().single();
+    if(error) throw error; return data;
+  },
+
+  /* ACHATS */
+  async createAchat(tacheId, libelle) {
+    const {data,error} = await sb.from('achats').insert({id:uid(),tache_id:tacheId,libelle,statut:'a_acheter'}).select().single();
+    if(error) throw error; return data;
+  },
+  async updateAchatStatut(id, statut) {
+    await sb.from('achats').update({statut}).eq('id',id);
+  },
+
+  /* BONS */
+  async listBons() {
+    const {data} = await sb.from('bons_commande').select('*,bons_taches(tache_id)').order('created_at',{ascending:false});
+    return data||[];
+  },
+  async createBon(d) {
+    const id = uid();
+    const num = 'BC-'+new Date().getFullYear()+'-'+String(Math.floor(Math.random()*9000)+1000);
+    await sb.from('bons_commande').insert({
+      id,num,chantier_id:d.chantierId,intervenant_id:d.artisanId,
+      date_butoir:d.dateButoir||null,notes:d.notes||''
+    });
+    if(d.tachesIds?.length) {
+      await sb.from('bons_taches').insert(d.tachesIds.map(tid=>({bon_id:id,tache_id:tid})));
+    }
+    return {id,num};
+  },
+};
+
+/* ── Normalize raw DB → UI ──────────────────────────────────── */
+function normalizeTaches(raw, chantierId) {
+  const {sections,taches,assignations,achats,etats,commentaires} = raw;
+  return taches.map(t=>{
+    const sec = sections.find(s=>s.id===t.section_id);
+    const asgn = assignations.find(a=>a.tache_id===t.id);
+    const etat = etats.find(e=>e.tache_id===t.id);
+    return {
+      id:t.id, chantierId, sectionId:t.section_id,
+      section:sec?.label||'Autre',
+      titre:t.texte, description:t.description||'',
+      artisanId:asgn?.intervenant_id||null,
+      duree:t.duree||1,
+      dateDebut:t.date_debut||'', dateFin:t.date_butoir||'',
+      priorite:t.priorite||'normale',
+      statut:t.statut||(etat?.done?'valide':'planifie'),
+      commentaires: commentaires.filter(c=>c.tache_id===t.id).map(c=>`${c.texte} — ${c.auteur||'Louis'}, ${fmtDate(c.created_at)}`),
+      achats: achats.filter(a=>a.tache_id===t.id).map(a=>({id:a.id,libelle:a.libelle,statut:a.statut})),
+    };
+  });
+}
+function normalizeArtisans(list) {
+  return list.map(i=>({id:i.id,nom:i.label,metier:i.metier||'',tel:i.tel||'',entreprise:i.entreprise||'',avatar:i.initiales,color:i.couleur}));
+}
+
+/* ── Theme ────────────────────────────────────────────────────── */
+const C={bg:'#080a0f',surface:'#10131a',card:'#161b27',border:'#1e2540',accent:'#f59e0b',green:'#10b981',red:'#f43f5e',blue:'#3b82f6',purple:'#8b5cf6',text:'#e8ecf4',muted:'#3d4a60',secondary:'#7e8fa8'};
+const H="'Syne',sans-serif", F="'DM Sans',sans-serif";
+
+const STATUTS={
+  planifie:{label:'Planifié',color:C.secondary,bg:'rgba(126,143,168,.12)'},
+  en_cours:{label:'En cours',color:C.blue,bg:'rgba(59,130,246,.12)'},
+  en_attente:{label:'⏳ Validation',color:C.accent,bg:'rgba(245,158,11,.12)'},
+  valide:{label:'✓ Validé',color:C.green,bg:'rgba(16,185,129,.12)'},
+  refuse:{label:'↩ Reprendre',color:C.red,bg:'rgba(244,63,94,.12)'},
+};
+const ACHAT_ST={
+  a_acheter:{label:'À acheter',color:C.red},
+  commande:{label:'Commandé',color:C.accent},
+  recu:{label:'Reçu',color:C.blue},
+  livre_chantier:{label:'Livré chantier',color:C.green},
+};
+const SECTIONS=['Démolition','Plomberie','Électricité','Plâtrerie','Peinture','Sol','Menuiserie','Isolation','Façade','Autre'];
+const METIERS=['Plombier','Électricien','Plâtrier','Peintre','Carreleur','Maçon','Charpentier','Menuisier','Couvreur','Façadier','Autre'];
+
+/* ── UI Atoms ─────────────────────────────────────────────────── */
+const Av=({code,color,size=32})=><div style={{width:size,height:size,borderRadius:'50%',background:`${color}22`,border:`1.5px solid ${color}55`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:size*.3,fontWeight:700,color,fontFamily:H,flexShrink:0}}>{code}</div>;
+const Badge=({label,color,bg})=><span style={{display:'inline-flex',alignItems:'center',padding:'2px 10px',borderRadius:99,fontSize:11,fontWeight:600,color,background:bg||`${color}18`,fontFamily:F,whiteSpace:'nowrap'}}>{label}</span>;
+const Pill=({n,color=C.accent})=><span style={{minWidth:20,height:20,padding:'0 6px',borderRadius:99,background:color,color:'#000',fontSize:10,fontWeight:800,display:'inline-flex',alignItems:'center',justifyContent:'center',fontFamily:H}}>{n}</span>;
+const Prog=({value,color=C.accent})=><div style={{width:'100%',height:4,borderRadius:99,background:C.border}}><div style={{width:`${Math.min(value||0,100)}%`,height:'100%',background:color,borderRadius:99,transition:'width .4s'}}/></div>;
+const Spinner=()=><div style={{width:20,height:20,border:`2px solid ${C.border}`,borderTopColor:C.accent,borderRadius:'50%',animation:'spin 1s linear infinite',display:'inline-block'}}/>;
+
+const Card=({children,style:sx={},onClick,hover})=>{
+  const [hov,setHov]=useState(false);
+  return <div onClick={onClick} onMouseEnter={()=>hover&&setHov(true)} onMouseLeave={()=>setHov(false)}
+    style={{background:C.card,border:`1px solid ${hov?C.accent+'55':C.border}`,borderRadius:14,padding:18,cursor:onClick?'pointer':'default',transition:'border-color .15s',...sx}}>{children}</div>;
+};
+const Btn=({children,onClick,variant='ghost',small,style:sx={},disabled,loading})=>{
+  const v={primary:{background:C.accent,color:'#0a0500',border:'none'},ghost:{background:'transparent',color:C.secondary,border:`1px solid ${C.border}`},danger:{background:`${C.red}15`,color:C.red,border:`1px solid ${C.red}33`},success:{background:`${C.green}15`,color:C.green,border:`1px solid ${C.green}33`},subtle:{background:C.surface,color:C.secondary,border:`1px solid ${C.border}`},purple:{background:`${C.purple}18`,color:C.purple,border:`1px solid ${C.purple}33`}};
+  return <button onClick={onClick} disabled={disabled||loading} style={{display:'inline-flex',alignItems:'center',gap:6,padding:small?'5px 12px':'8px 18px',borderRadius:8,fontSize:small?12:13,fontWeight:600,cursor:(disabled||loading)?'not-allowed':'pointer',fontFamily:F,opacity:(disabled||loading)?.55:1,...v[variant],...sx}}>{loading?<Spinner/>:children}</button>;
+};
+const FInput=({label,value,onChange,type='text',placeholder,as,options,rows=3})=>{
+  const base={background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:'9px 12px',color:C.text,fontSize:13,fontFamily:F,outline:'none',width:'100%',boxSizing:'border-box'};
+  return <div style={{display:'flex',flexDirection:'column',gap:5}}>
+    {label&&<label style={{fontSize:10,fontWeight:600,color:C.secondary,textTransform:'uppercase',letterSpacing:1,fontFamily:H}}>{label}</label>}
+    {as==='select'?<select value={value} onChange={onChange} style={base}>{options?.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}</select>
+    :as==='textarea'?<textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows} style={{...base,resize:'vertical'}}/>
+    :<input type={type} value={value} onChange={onChange} placeholder={placeholder} style={base}/>}
+  </div>;
+};
+
+/* ── Toast notifications ──────────────────────────────────────── */
+const Toast=({msg,type='success'})=>(
+  <div style={{position:'fixed',bottom:24,right:24,background:type==='error'?C.red:C.green,color:'#fff',padding:'10px 18px',borderRadius:10,fontSize:13,fontFamily:F,fontWeight:600,zIndex:9999,animation:'fadeIn .2s'}}>{msg}</div>
+);
+
+/* ── Modal ────────────────────────────────────────────────────── */
+const Modal=({children,onClose,title,subtitle,wide})=>(
+  <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.82)',zIndex:2000,display:'flex',alignItems:'center',justifyContent:'center',padding:16,animation:'fadeIn .15s'}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,width:'100%',maxWidth:wide?820:560,maxHeight:'92vh',overflowY:'auto',display:'flex',flexDirection:'column'}}>
+      <div style={{padding:'18px 20px',borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:12,flexShrink:0}}>
+        <div style={{flex:1}}>
+          {subtitle&&<div style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2}}>{subtitle}</div>}
+          <div style={{fontSize:16,fontWeight:800,color:C.text,fontFamily:H}}>{title}</div>
+        </div>
+        <button onClick={onClose} style={{background:'none',border:'none',color:C.secondary,fontSize:24,cursor:'pointer',lineHeight:1,padding:'0 4px'}}>×</button>
+      </div>
+      {children}
+    </div>
+  </div>
+);
+
+/* ── Gantt ────────────────────────────────────────────────────── */
+function Gantt({taches,artisans}){
+  const valid=taches.filter(t=>t.dateDebut&&t.dateFin);
+  if(!valid.length) return <div style={{color:C.muted,padding:20,fontFamily:F,fontSize:13}}>Aucune tâche avec dates planifiées.</div>;
+  const allD=valid.flatMap(t=>[new Date(t.dateDebut),new Date(t.dateFin)]);
+  const minD=new Date(Math.min(...allD)); minD.setDate(minD.getDate()-2);
+  const maxD=new Date(Math.max(...allD)); maxD.setDate(maxD.getDate()+5);
+  const total=Math.ceil((maxD-minD)/864e5)||1;
+  const xp=d=>((new Date(d)-minD)/864e5/total)*100;
+  const wp=(d1,d2)=>Math.max(((new Date(d2)-new Date(d1))/864e5/total)*100,1.5);
+  const tks=[]; const d=new Date(minD); while(d<=maxD){tks.push(new Date(d));d.setDate(d.getDate()+7);}
+  const bc={planifie:C.secondary,en_cours:C.blue,en_attente:C.accent,valide:C.green,refuse:C.red};
+  return <div style={{overflowX:'auto'}}>
+    <Card style={{padding:0,overflow:'hidden',minWidth:560}}>
+      <div style={{display:'grid',gridTemplateColumns:'185px 1fr',borderBottom:`1px solid ${C.border}`}}>
+        <div style={{padding:'10px 14px',borderRight:`1px solid ${C.border}`,fontSize:10,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1}}>Tâche</div>
+        <div style={{position:'relative',height:32}}>
+          {tks.map((t,i)=><div key={i} style={{position:'absolute',left:`${xp(t)}%`,top:0,height:'100%',borderLeft:`1px dashed ${C.border}`,paddingLeft:3,display:'flex',alignItems:'center'}}><span style={{fontSize:9,color:C.muted,fontFamily:F,whiteSpace:'nowrap'}}>{t.toLocaleDateString('fr-FR',{day:'2-digit',month:'short'})}</span></div>)}
+          {(()=>{const p=xp(new Date());return(p>0&&p<100)&&<div style={{position:'absolute',left:`${p}%`,top:0,height:'100%',borderLeft:`2px solid ${C.red}`,zIndex:2}}><div style={{background:C.red,color:'#fff',fontSize:8,padding:'0 3px',borderRadius:'0 3px 3px 0',fontFamily:F,lineHeight:'14px',whiteSpace:'nowrap'}}>Auj.</div></div>;})()}
+        </div>
+      </div>
+      {valid.map(t=>{
+        const ar=artisans.find(a=>a.id===t.artisanId);
+        const px=xp(t.dateDebut),pw=wp(t.dateDebut,t.dateFin);
+        return <div key={t.id} style={{display:'grid',gridTemplateColumns:'185px 1fr',borderBottom:`1px solid ${C.border}`}}>
+          <div style={{padding:'6px 14px',borderRight:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:6}}>
+            {ar&&<Av code={ar.avatar} color={ar.color} size={20}/>}
+            <span style={{fontSize:11,color:C.text,fontFamily:F,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.titre}</span>
+          </div>
+          <div style={{position:'relative',height:32}}>
+            <div title={`${t.titre} — ${t.duree}j`} style={{position:'absolute',top:'22%',left:`${px}%`,width:`${pw}%`,height:'56%',background:bc[t.statut]||C.secondary,borderRadius:4,opacity:.82,display:'flex',alignItems:'center',paddingLeft:5}}>
+              <span style={{fontSize:9,color:'#fff',fontFamily:F,whiteSpace:'nowrap',overflow:'hidden'}}>{t.duree}j</span>
+            </div>
+          </div>
+        </div>;
+      })}
+    </Card>
+  </div>;
+}
+
+/* ── Tache Modal ──────────────────────────────────────────────── */
+function TacheModal({tache,artisans,onClose,onSaved,sections=[]}){
+  const [t,setT]=useState({...tache});
+  const [nc,setNc]=useState('');
+  const [saving,setSaving]=useState(false);
+  const ar=artisans.find(a=>a.id===t.artisanId);
+
+  const save=async()=>{
+    setSaving(true);
+    try{
+      await DB.updateTache(t.id,t,t.artisanId);
+      onSaved(); onClose();
+    }catch(e){alert('Erreur: '+e.message);}
+    setSaving(false);
+  };
+
+  const addComment=async()=>{
+    if(!nc.trim()) return;
+    const c=await DB.addCommentaire(t.id,nc);
+    const ts=fmtDate(c.created_at);
+    setT(p=>({...p,commentaires:[...p.commentaires,`${nc} — Louis, ${ts}`]}));
+    setNc('');
+  };
+
+  return <Modal title={t.titre} subtitle={t.section} onClose={onClose}>
+    <div style={{padding:20,display:'flex',flexDirection:'column',gap:16}}>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+        {[['Artisan',<div style={{display:'flex',alignItems:'center',gap:6,marginTop:3}}>{ar&&<Av code={ar.avatar} color={ar.color} size={22}/>}<span style={{fontSize:12,color:C.text,fontFamily:F}}>{ar?.nom||'Non assigné'}</span></div>],['Dates',<div style={{fontSize:12,color:C.text,fontFamily:F,marginTop:3}}>{fmtDate(t.dateDebut)}→{fmtDate(t.dateFin)}</div>],['Durée',<div style={{fontSize:12,color:C.text,fontFamily:F,marginTop:3}}>{t.duree}j</div>]].map(([l,v],i)=>(
+          <div key={i} style={{background:C.surface,borderRadius:10,padding:'10px 12px'}}><div style={{fontSize:9,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1}}>{l}</div>{v}</div>
+        ))}
+      </div>
+      <div>
+        <div style={{fontSize:10,fontWeight:600,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>Artisan assigné</div>
+        <select value={t.artisanId||''} onChange={e=>setT(p=>({...p,artisanId:e.target.value||null}))} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:'8px 12px',color:C.text,fontSize:13,fontFamily:F,outline:'none',width:'100%'}}>
+          <option value=''>— Non assigné —</option>
+          {artisans.map(a=><option key={a.id} value={a.id}>{a.nom} ({a.metier})</option>)}
+        </select>
+      </div>
+      <div>
+        <div style={{fontSize:10,fontWeight:600,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>Statut</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+          {Object.entries(STATUTS).map(([k,v])=>(
+            <button key={k} onClick={()=>setT(p=>({...p,statut:k}))} style={{padding:'5px 12px',borderRadius:99,fontSize:12,fontWeight:600,cursor:'pointer',border:`1.5px solid ${t.statut===k?v.color:C.border}`,background:t.statut===k?v.bg:'transparent',color:t.statut===k?v.color:C.secondary,fontFamily:F}}>{v.label}</button>
+          ))}
+        </div>
+      </div>
+      {t.description&&<div style={{background:C.surface,borderRadius:10,padding:'10px 14px',fontSize:13,color:C.secondary,fontFamily:F}}>{t.description}</div>}
+      {t.achats.length>0&&<div>
+        <div style={{fontSize:10,fontWeight:600,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>Achats liés</div>
+        {t.achats.map(a=>{const ast=ACHAT_ST[a.statut];return <div key={a.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:13,color:C.text,fontFamily:F}}>{a.libelle}</span><Badge label={ast.label} color={ast.color}/></div>;})}
+      </div>}
+      <div>
+        <div style={{fontSize:10,fontWeight:600,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>Discussion ({t.commentaires.length})</div>
+        {t.commentaires.length===0&&<div style={{fontSize:12,color:C.muted,fontFamily:F,marginBottom:8}}>Aucun commentaire.</div>}
+        {t.commentaires.map((c,i)=><div key={i} style={{background:C.surface,borderRadius:8,padding:'8px 12px',marginBottom:5,fontSize:12,color:C.text,fontFamily:F}}>{c}</div>)}
+        <div style={{display:'flex',gap:8,marginTop:6}}>
+          <input value={nc} onChange={e=>setNc(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addComment()} placeholder="Ajouter un commentaire…" style={{flex:1,background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:'8px 12px',color:C.text,fontSize:13,fontFamily:F,outline:'none'}}/>
+          <Btn onClick={addComment} variant="primary" small>Envoyer</Btn>
+        </div>
+      </div>
+    </div>
+    <div style={{padding:'14px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={onClose} variant="ghost">Annuler</Btn>
+      <Btn onClick={save} variant="primary" loading={saving}>Sauvegarder</Btn>
+    </div>
+  </Modal>;
+}
+
+/* ── Add Tache Modal ──────────────────────────────────────────── */
+function AddTacheModal({chantierId,artisans,existingSections,onSaved,onClose}){
+  const [f,setF]=useState({titre:'',section:existingSections[0]?.label||SECTIONS[0],newSection:'',artisanId:artisans[0]?.id||'',dateDebut:'',dateFin:'',duree:'1',priorite:'normale',description:''});
+  const [saving,setSaving]=useState(false);
+  const u=(k,v)=>setF(p=>({...p,[k]:v}));
+  const isNew=f.section==='__new__';
+  const sectionLabel=isNew?f.newSection:f.section;
+
+  const save=async()=>{
+    if(!f.titre.trim()||!sectionLabel.trim()) return;
+    setSaving(true);
+    try{
+      const sec=await DB.getOrCreateSection(chantierId,sectionLabel,existingSections);
+      await DB.createTache(sec.id,f,f.artisanId||null);
+      onSaved(); onClose();
+    }catch(e){alert('Erreur: '+e.message);}
+    setSaving(false);
+  };
+
+  const sectionOpts=[...existingSections.map(s=>({value:s.label,label:s.label})),...SECTIONS.filter(s=>!existingSections.find(es=>es.label===s)).map(s=>({value:s,label:s})),{value:'__new__',label:'+ Nouvelle section…'}];
+
+  return <Modal title="Nouvelle tâche" subtitle="Tâches" onClose={onClose}>
+    <div style={{padding:20,display:'flex',flexDirection:'column',gap:14}}>
+      <FInput label="Titre de la tâche" value={f.titre} onChange={e=>u('titre',e.target.value)} placeholder="ex: Pose carrelage 40m²"/>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <FInput label="Section" as="select" value={f.section} onChange={e=>u('section',e.target.value)} options={sectionOpts}/>
+        {isNew&&<FInput label="Nom de la nouvelle section" value={f.newSection} onChange={e=>u('newSection',e.target.value)} placeholder="ex: Façade"/>}
+        <FInput label="Artisan" as="select" value={f.artisanId} onChange={e=>u('artisanId',e.target.value)} options={[{value:'',label:'— Non assigné —'},...artisans.map(a=>({value:a.id,label:`${a.nom} (${a.metier})`}))]}/>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
+        <FInput label="Début" type="date" value={f.dateDebut} onChange={e=>u('dateDebut',e.target.value)}/>
+        <FInput label="Fin" type="date" value={f.dateFin} onChange={e=>u('dateFin',e.target.value)}/>
+        <FInput label="Durée (j)" type="number" value={f.duree} onChange={e=>u('duree',e.target.value)}/>
+      </div>
+      <FInput label="Priorité" as="select" value={f.priorite} onChange={e=>u('priorite',e.target.value)} options={[{value:'haute',label:'🔴 Haute'},{value:'normale',label:'🟡 Normale'},{value:'basse',label:'🟢 Basse'}]}/>
+      <FInput label="Description / Consignes" as="textarea" value={f.description} onChange={e=>u('description',e.target.value)} placeholder="Détail des travaux, matériaux…"/>
+    </div>
+    <div style={{padding:'14px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={onClose} variant="ghost">Annuler</Btn>
+      <Btn onClick={save} variant="primary" loading={saving}>Créer la tâche</Btn>
+    </div>
+  </Modal>;
+}
+
+/* ── Add Artisan Modal ────────────────────────────────────────── */
+function AddArtisanModal({onSaved,onClose}){
+  const [f,setF]=useState({nom:'',metier:METIERS[0],tel:'',entreprise:'',colorIdx:0});
+  const [saving,setSaving]=useState(false);
+  const u=(k,v)=>setF(p=>({...p,[k]:v}));
+  const save=async()=>{
+    if(!f.nom.trim()) return;
+    setSaving(true);
+    try{ await DB.createIntervenant({...f,color:AV_COLORS[f.colorIdx]}); onSaved(); onClose();}
+    catch(e){alert('Erreur: '+e.message);}
+    setSaving(false);
+  };
+  return <Modal title="Nouvel artisan" subtitle="Équipe" onClose={onClose}>
+    <div style={{padding:20,display:'flex',flexDirection:'column',gap:14}}>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <FInput label="Nom complet" value={f.nom} onChange={e=>u('nom',e.target.value)} placeholder="Prénom Nom"/>
+        <FInput label="Métier" as="select" value={f.metier} onChange={e=>u('metier',e.target.value)} options={METIERS.map(m=>({value:m,label:m}))}/>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <FInput label="Téléphone" value={f.tel} onChange={e=>u('tel',e.target.value)} placeholder="06 00 00 00 00"/>
+        <FInput label="Entreprise" value={f.entreprise} onChange={e=>u('entreprise',e.target.value)} placeholder="Nom société"/>
+      </div>
+      <div>
+        <label style={{fontSize:10,fontWeight:600,color:C.secondary,textTransform:'uppercase',letterSpacing:1,fontFamily:H,display:'block',marginBottom:8}}>Couleur</label>
+        <div style={{display:'flex',gap:8}}>{AV_COLORS.map((col,i)=><div key={i} onClick={()=>u('colorIdx',i)} style={{width:28,height:28,borderRadius:'50%',background:col,cursor:'pointer',border:f.colorIdx===i?`3px solid ${C.text}`:'3px solid transparent'}}/>)}</div>
+      </div>
+      {f.nom&&<div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:C.surface,borderRadius:10}}><Av code={initials(f.nom)} color={AV_COLORS[f.colorIdx]} size={38}/><div><div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H}}>{f.nom}</div><div style={{fontSize:12,color:C.secondary,fontFamily:F}}>{f.metier}{f.entreprise?` · ${f.entreprise}`:''}</div></div></div>}
+    </div>
+    <div style={{padding:'14px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={onClose} variant="ghost">Annuler</Btn>
+      <Btn onClick={save} variant="primary" loading={saving}>Ajouter</Btn>
+    </div>
+  </Modal>;
+}
+
+/* ── Import Devis Modal ───────────────────────────────────────── */
+function ImportDevisModal({chantierId,chantierNom,artisans,existingSections,onSaved,onClose}){
+  const [step,setStep]=useState('upload');
+  const [lines,setLines]=useState([]);
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
+  const fileRef=useRef();
+
+  const extractWithAI=async(content)=>{
+    setStep('extracting'); setError('');
+    const prompt=`Tu es un expert BTP. Analyse ce devis/bordereau pour le chantier "${chantierNom}" et extrais toutes les lignes de travaux.
+Pour chaque ligne renvoie un objet JSON avec : titre (string), section (parmi: ${SECTIONS.join(', ')}), description (string), duree (number jours), prixUnitaire (number|null), quantite (number|null), unite (string).
+Réponds UNIQUEMENT avec un tableau JSON valide, sans backticks, sans texte.
+Si vide ou insuffisant, génère 5 exemples réalistes.
+Contenu : ${content.slice(0,3000)}`;
+    try{
+      const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2000,messages:[{role:'user',content:prompt}]})});
+      const data=await res.json();
+      const txt=data.content?.find(b=>b.type==='text')?.text||'[]';
+      const parsed=JSON.parse(txt.replace(/```json|```/g,'').trim());
+      setLines(parsed.map((l,i)=>({_id:uid(),selected:true,titre:l.titre||'Tâche '+(i+1),section:SECTIONS.includes(l.section)?l.section:'Autre',description:l.description||'',duree:Number(l.duree)||1,prixUnitaire:l.prixUnitaire||null,artisanId:artisans[0]?.id||'',dateDebut:'',dateFin:'',priorite:'normale'})));
+      setStep('review');
+    }catch(e){setError('Erreur: '+e.message);setStep('upload');}
+  };
+
+  const readFile=async(file)=>{
+    let text='';
+    if(file.name.match(/\.(csv|txt)$/i)) text=await file.text();
+    else text=`Fichier: ${file.name} (${Math.round(file.size/1024)}ko). Génère des exemples réalistes.`;
+    await extractWithAI(text);
+  };
+
+  const toggle=id=>setLines(l=>l.map(x=>x._id===id?{...x,selected:!x.selected}:x));
+  const upd=(id,k,v)=>setLines(l=>l.map(x=>x._id===id?{...x,[k]:v}:x));
+
+  const importLines=async()=>{
+    setSaving(true);
+    try{
+      for(const l of lines.filter(x=>x.selected)){
+        const sec=await DB.getOrCreateSection(chantierId,l.section,existingSections);
+        await DB.createTache(sec.id,{titre:l.titre,description:l.description,duree:l.duree,dateDebut:l.dateDebut,dateFin:l.dateFin,priorite:l.priorite},l.artisanId||null);
+      }
+      onSaved(); onClose();
+    }catch(e){alert('Erreur: '+e.message);}
+    setSaving(false);
+  };
+
+  return <Modal title="Import devis / bordereau" subtitle={chantierNom} onClose={onClose} wide>
+    {step==='upload'&&<div style={{padding:28,display:'flex',flexDirection:'column',alignItems:'center',gap:18}}>
+      <div style={{fontSize:48}}>📄</div>
+      <div style={{textAlign:'center'}}><div style={{fontSize:16,fontWeight:700,color:C.text,fontFamily:H}}>Importer un devis ou bordereau</div><div style={{fontSize:13,color:C.secondary,fontFamily:F,marginTop:4}}>PDF, CSV, Excel ou texte brut</div></div>
+      <div onClick={()=>fileRef.current.click()} style={{border:`2px dashed ${C.border}`,borderRadius:14,padding:'28px 40px',cursor:'pointer',textAlign:'center',width:'100%',background:C.surface}}>
+        <div style={{fontSize:13,color:C.secondary,fontFamily:F}}>Cliquer pour sélectionner un fichier</div>
+      </div>
+      <input ref={fileRef} type="file" accept=".pdf,.xlsx,.csv,.txt,.xls" style={{display:'none'}} onChange={e=>e.target.files[0]&&readFile(e.target.files[0])}/>
+      <div style={{display:'flex',alignItems:'center',gap:10,width:'100%'}}><div style={{flex:1,height:1,background:C.border}}/><span style={{fontSize:11,color:C.muted,fontFamily:F}}>ou</span><div style={{flex:1,height:1,background:C.border}}/></div>
+      <Btn onClick={()=>extractWithAI('Génère des exemples réalistes pour ce chantier de rénovation.')} variant="subtle">✨ Démo — générer des exemples IA</Btn>
+      {error&&<div style={{color:C.red,fontSize:12,fontFamily:F}}>{error}</div>}
+    </div>}
+    {step==='extracting'&&<div style={{padding:60,display:'flex',flexDirection:'column',alignItems:'center',gap:16}}>
+      <div style={{fontSize:40,display:'inline-block',animation:'spin 1.2s linear infinite'}}>⚙️</div>
+      <div style={{fontSize:15,fontWeight:700,color:C.text,fontFamily:H}}>Analyse en cours…</div>
+    </div>}
+    {step==='review'&&<>
+      <div style={{padding:'12px 20px',background:`${C.green}10`,borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <span style={{fontSize:13,color:C.green,fontFamily:F}}>✓ {lines.length} lignes — {lines.filter(l=>l.selected).length} sélectionnées</span>
+        <div style={{display:'flex',gap:8}}>
+          <Btn small variant="subtle" onClick={()=>setLines(l=>l.map(x=>({...x,selected:true})))}>Tout cocher</Btn>
+          <Btn small variant="subtle" onClick={()=>setLines(l=>l.map(x=>({...x,selected:false})))}>Tout décocher</Btn>
+        </div>
+      </div>
+      <div style={{padding:14,display:'flex',flexDirection:'column',gap:9,overflowY:'auto',maxHeight:400}}>
+        {lines.map(l=><div key={l._id} style={{background:l.selected?C.surface:C.bg,border:`1px solid ${l.selected?C.border:C.muted+'22'}`,borderRadius:11,padding:'11px 13px',opacity:l.selected?1:.5}}>
+          <div style={{display:'flex',alignItems:'flex-start',gap:10}}>
+            <input type="checkbox" checked={l.selected} onChange={()=>toggle(l._id)} style={{marginTop:3,accentColor:C.accent,cursor:'pointer',flexShrink:0,width:15,height:15}}/>
+            <div style={{flex:1,display:'grid',gridTemplateColumns:'2fr 1fr 1fr 80px',gap:8}}>
+              <div>
+                <input value={l.titre} onChange={e=>upd(l._id,'titre',e.target.value)} style={{background:'transparent',border:`1px solid ${C.border}`,borderRadius:7,padding:'4px 8px',color:C.text,fontSize:13,fontWeight:600,fontFamily:F,outline:'none',width:'100%'}}/>
+                <div style={{fontSize:11,color:C.muted,marginTop:3,paddingLeft:2,fontFamily:F}}>{l.description||'—'}</div>
+              </div>
+              <select value={l.section} onChange={e=>upd(l._id,'section',e.target.value)} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,padding:'4px 7px',color:C.text,fontSize:11,fontFamily:F,outline:'none'}}>
+                {SECTIONS.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+              <select value={l.artisanId} onChange={e=>upd(l._id,'artisanId',e.target.value)} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,padding:'4px 7px',color:C.text,fontSize:11,fontFamily:F,outline:'none'}}>
+                <option value=''>—</option>
+                {artisans.map(a=><option key={a.id} value={a.id}>{a.nom}</option>)}
+              </select>
+              <div style={{display:'flex',alignItems:'center',gap:4}}>
+                <input type="number" value={l.duree} onChange={e=>upd(l._id,'duree',Number(e.target.value))} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,padding:'4px 6px',color:C.accent,fontSize:12,fontFamily:F,outline:'none',width:44}}/>
+                <span style={{fontSize:11,color:C.muted,fontFamily:F}}>j</span>
+                {l.prixUnitaire&&<span style={{fontSize:10,color:C.green,fontFamily:F}}>{fmtMoney(l.prixUnitaire)}</span>}
+              </div>
+            </div>
+          </div>
+        </div>)}
+      </div>
+      <div style={{padding:'14px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:8,justifyContent:'flex-end'}}>
+        <Btn onClick={()=>setStep('upload')} variant="ghost">← Retour</Btn>
+        <Btn onClick={importLines} variant="primary" loading={saving} disabled={!lines.filter(l=>l.selected).length}>
+          ＋ Importer {lines.filter(l=>l.selected).length} tâche{lines.filter(l=>l.selected).length>1?'s':''}
+        </Btn>
+      </div>
+    </>}
+  </Modal>;
+}
+
+/* ── Bon de Commande Modal ────────────────────────────────────── */
+function BonCommandeModal({chantiers,artisans,allTaches,onSaved,onClose,prefillCh,prefillAr}){
+  const [f,setF]=useState({artisanId:prefillAr||artisans[0]?.id||'',chantierId:prefillCh||chantiers[0]?.id||'',tachesIds:[],dateButoir:'',notes:''});
+  const [preview,setPreview]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const u=(k,v)=>setF(p=>({...p,[k]:v}));
+  const ct=allTaches.filter(t=>t.chantierId===f.chantierId&&t.artisanId===f.artisanId);
+  const tog=id=>setF(p=>({...p,tachesIds:p.tachesIds.includes(id)?p.tachesIds.filter(x=>x!==id):[...p.tachesIds,id]}));
+  const ar=artisans.find(a=>a.id===f.artisanId);
+  const ch=chantiers.find(c=>c.id===f.chantierId);
+  const selT=allTaches.filter(t=>f.tachesIds.includes(t.id));
+  const save=async()=>{setSaving(true);try{const {num}=await DB.createBon(f);onSaved();onClose();}catch(e){alert('Erreur: '+e.message);}setSaving(false);};
+  if(preview) return <Modal title="Prévisualisation BC" subtitle="Bon de commande" onClose={()=>setPreview(false)} wide>
+    <div style={{padding:28,fontFamily:F}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:24,paddingBottom:18,borderBottom:`2px solid ${C.accent}`}}>
+        <div><div style={{fontSize:22,fontWeight:800,color:C.text,fontFamily:H}}>BON DE COMMANDE</div><div style={{fontSize:13,color:C.accent,fontFamily:H,marginTop:2}}>BC-{new Date().getFullYear()}-XXXX</div></div>
+        <div style={{textAlign:'right',fontSize:12,color:C.secondary}}><div>Date : {new Date().toLocaleDateString('fr-FR')}</div><div>Émis par : Louis — LCH Group</div></div>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18,marginBottom:18}}>
+        <div style={{background:C.surface,borderRadius:10,padding:14}}><div style={{fontSize:9,color:C.muted,textTransform:'uppercase',letterSpacing:1,marginBottom:8,fontFamily:H}}>Destinataire</div><div style={{display:'flex',alignItems:'center',gap:10}}>{ar&&<Av code={ar.avatar} color={ar.color} size={34}/>}<div><div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H}}>{ar?.nom}</div><div style={{fontSize:12,color:C.secondary}}>{ar?.metier} · {ar?.tel}</div></div></div></div>
+        <div style={{background:C.surface,borderRadius:10,padding:14}}><div style={{fontSize:9,color:C.muted,textTransform:'uppercase',letterSpacing:1,marginBottom:8,fontFamily:H}}>Chantier</div><div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H}}>{ch?.nom}</div><div style={{fontSize:12,color:C.secondary,marginTop:3}}>{ch?.adresse}</div></div>
+      </div>
+      <div style={{border:`1px solid ${C.border}`,borderRadius:10,overflow:'hidden',marginBottom:18}}>
+        <div style={{display:'grid',gridTemplateColumns:'3fr 1fr 1fr 1fr',background:C.surface,padding:'8px 14px',fontSize:9,color:C.muted,textTransform:'uppercase',letterSpacing:1,fontFamily:H}}><span>Prestation</span><span>Section</span><span>Durée</span><span>Dates</span></div>
+        {selT.map((t,i)=><div key={t.id} style={{display:'grid',gridTemplateColumns:'3fr 1fr 1fr 1fr',padding:'10px 14px',borderTop:`1px solid ${C.border}`,background:i%2===0?C.card:C.bg}}>
+          <div><div style={{fontSize:13,fontWeight:600,color:C.text}}>{t.titre}</div>{t.description&&<div style={{fontSize:11,color:C.secondary,marginTop:2}}>{t.description}</div>}</div>
+          <span style={{fontSize:12,color:C.secondary,alignSelf:'center'}}>{t.section}</span>
+          <span style={{fontSize:12,color:C.accent,fontWeight:700,alignSelf:'center'}}>{t.duree}j</span>
+          <span style={{fontSize:11,color:C.secondary,alignSelf:'center'}}>{fmtDate(t.dateDebut)}→{fmtDate(t.dateFin)}</span>
+        </div>)}
+      </div>
+      {f.dateButoir&&<div style={{background:`${C.red}10`,border:`1px solid ${C.red}33`,borderRadius:8,padding:'10px 14px',fontSize:13,color:C.red,marginBottom:14}}>⚠️ Date butoir : {fmtDate(f.dateButoir)}</div>}
+      {f.notes&&<div style={{background:C.surface,borderRadius:8,padding:'10px 14px',fontSize:13,color:C.text,marginBottom:14}}>📝 {f.notes}</div>}
+    </div>
+    <div style={{padding:'14px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={()=>setPreview(false)} variant="ghost">← Modifier</Btn>
+      <Btn onClick={save} variant="primary" loading={saving}>✓ Valider & Enregistrer</Btn>
+    </div>
+  </Modal>;
+
+  return <Modal title="Nouveau bon de commande" subtitle="Commandes" onClose={onClose}>
+    <div style={{padding:20,display:'flex',flexDirection:'column',gap:14}}>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <FInput label="Artisan" as="select" value={f.artisanId} onChange={e=>u('artisanId',e.target.value)} options={artisans.map(a=>({value:a.id,label:`${a.nom} — ${a.metier}`}))}/>
+        <FInput label="Chantier" as="select" value={f.chantierId} onChange={e=>u('chantierId',e.target.value)} options={chantiers.map(c=>({value:c.id,label:c.nom.split('–')[0].trim()}))}/>
+      </div>
+      <div>
+        <div style={{fontSize:10,fontWeight:600,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>Tâches concernées {ct.length===0&&<span style={{color:C.red}}>— aucune tâche pour cet artisan sur ce chantier</span>}</div>
+        <div style={{display:'flex',flexDirection:'column',gap:6,maxHeight:180,overflowY:'auto'}}>
+          {ct.map(t=>{const sel=f.tachesIds.includes(t.id);const st=STATUTS[t.statut];return <div key={t.id} onClick={()=>tog(t.id)} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',background:sel?C.surface:C.bg,border:`1px solid ${sel?C.accent+'44':C.border}`,borderRadius:9,cursor:'pointer'}}>
+            <input type="checkbox" checked={sel} onChange={()=>{}} style={{accentColor:C.accent,pointerEvents:'none'}}/>
+            <div style={{flex:1}}><span style={{fontSize:13,color:C.text,fontFamily:F}}>{t.titre}</span><span style={{fontSize:11,color:C.muted,marginLeft:8,fontFamily:F}}>{t.section} · {t.duree}j</span></div>
+            <Badge label={st.label} color={st.color} bg={st.bg}/>
+          </div>;})}
+          {ct.length===0&&<div style={{fontSize:12,color:C.muted,fontFamily:F,padding:'8px 4px'}}>Changez l'artisan ou le chantier.</div>}
+        </div>
+      </div>
+      <FInput label="Date butoir" type="date" value={f.dateButoir} onChange={e=>u('dateButoir',e.target.value)}/>
+      <FInput label="Notes / Consignes" as="textarea" value={f.notes} onChange={e=>u('notes',e.target.value)} placeholder="Accès chantier, matériaux fournis…" rows={2}/>
+    </div>
+    <div style={{padding:'14px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={onClose} variant="ghost">Annuler</Btn>
+      <Btn onClick={()=>setPreview(true)} variant="subtle" disabled={!f.tachesIds.length}>Prévisualiser</Btn>
+      <Btn onClick={save} variant="primary" loading={saving} disabled={!f.tachesIds.length}>Créer le bon</Btn>
+    </div>
+  </Modal>;
+}
+
+/* ── Mobile Artisan View ──────────────────────────────────────── */
+function MobileView({artisans,taches,chantiers,onClose}){
+  const [sel,setSel]=useState(null);
+  const [selT,setSelT]=useState(null);
+  const [nc,setNc]=useState('');
+  const [saving,setSaving]=useState(false);
+  const ar=sel?artisans.find(a=>a.id===sel):null;
+  const arT=ar?taches.filter(t=>t.artisanId===ar.id).sort((a,b)=>{const o={en_cours:0,en_attente:1,refuse:2,planifie:3,valide:4};return(o[a.statut]||5)-(o[b.statut]||5);}):[];
+  const tache=selT?taches.find(t=>t.id===selT):null;
+  const [localStatut,setLocalStatut]=useState({});
+
+  const getStatut=t=>localStatut[t.id]||t.statut;
+
+  const updateStatut=async(t,newSt)=>{
+    setSaving(true);
+    setLocalStatut(p=>({...p,[t.id]:newSt}));
+    await DB.updateTache(t.id,{...t,statut:newSt},undefined);
+    setSaving(false);
+  };
+
+  const addComment=async()=>{
+    if(!nc.trim()||!tache) return;
+    const c=await DB.addCommentaire(tache.id,nc);
+    setNc('');
+  };
+
+  return <div style={{position:'fixed',inset:0,background:C.bg,zIndex:3000,overflowY:'auto'}}>
+    <div style={{maxWidth:390,margin:'0 auto',fontFamily:F}}>
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:'14px 16px',display:'flex',alignItems:'center',gap:10,position:'sticky',top:0,zIndex:10}}>
+        {(sel||selT)?<button onClick={()=>{if(selT)setSelT(null);else setSel(null);}} style={{background:'none',border:'none',color:C.secondary,fontSize:22,cursor:'pointer',padding:0,lineHeight:1}}>←</button>:<div style={{width:10}}/>}
+        <div style={{flex:1,textAlign:'center'}}>
+          {selT&&tache?<div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tache.titre}</div>
+          :sel&&ar?<div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H}}>{ar.nom}</div>
+          :<div style={{fontSize:15,fontWeight:800,color:C.text,fontFamily:H}}>🏗 ChantierPro</div>}
+        </div>
+        <button onClick={onClose} style={{background:'none',border:`1px solid ${C.border}`,borderRadius:6,padding:'4px 10px',color:C.secondary,fontSize:12,cursor:'pointer',fontFamily:F}}>Admin</button>
+      </div>
+
+      {!sel&&<div style={{padding:16}}>
+        <div style={{fontSize:11,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:14}}>Sélectionner votre profil</div>
+        {artisans.map(a=>{
+          const at=taches.filter(t=>t.artisanId===a.id&&['en_cours','planifie','en_attente'].includes(t.statut)).length;
+          return <div key={a.id} onClick={()=>setSel(a.id)} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16,marginBottom:10,display:'flex',alignItems:'center',gap:14,cursor:'pointer'}}>
+            <Av code={a.avatar} color={a.color} size={46}/>
+            <div style={{flex:1}}><div style={{fontSize:16,fontWeight:700,color:C.text,fontFamily:H}}>{a.nom}</div><div style={{fontSize:13,color:C.secondary}}>{a.metier}</div></div>
+            {at>0&&<div style={{background:C.accent,color:'#000',borderRadius:99,width:28,height:28,display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,fontWeight:800,fontFamily:H}}>{at}</div>}
+          </div>;
+        })}
+      </div>}
+
+      {sel&&!selT&&<div style={{padding:16}}>
+        <div style={{fontSize:11,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:12}}>{arT.length} tâche{arT.length>1?'s':''} assignée{arT.length>1?'s':''}</div>
+        {arT.map(t=>{
+          const ch=chantiers.find(c=>c.id===t.chantierId);const st=STATUTS[getStatut(t)];
+          return <div key={t.id} onClick={()=>setSelT(t.id)} style={{background:C.card,border:`1px solid ${t.statut==='en_attente'?C.accent+'44':C.border}`,borderRadius:14,padding:16,marginBottom:10,cursor:'pointer'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
+              <div style={{flex:1,marginRight:10}}><div style={{fontSize:15,fontWeight:700,color:C.text,fontFamily:H,lineHeight:1.3}}>{t.titre}</div><div style={{fontSize:12,color:C.secondary,marginTop:4}}>{ch?.nom?.split('–')[0]?.trim()} · {t.section}</div></div>
+              <Badge label={st.label} color={st.color} bg={st.bg}/>
+            </div>
+            <div style={{fontSize:12,color:C.muted}}>📅 {fmtDate(t.dateDebut)} → {fmtDate(t.dateFin)} · ⏱ {t.duree}j</div>
+            {getStatut(t)==='planifie'&&<button onClick={e=>{e.stopPropagation();updateStatut(t,'en_cours');}} style={{marginTop:12,width:'100%',padding:10,background:C.blue,color:'#fff',border:'none',borderRadius:10,fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:F}}>▶ Démarrer</button>}
+            {getStatut(t)==='en_cours'&&<button onClick={e=>{e.stopPropagation();updateStatut(t,'en_attente');}} style={{marginTop:12,width:'100%',padding:10,background:C.green,color:'#fff',border:'none',borderRadius:10,fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:F}}>✓ Terminé — demander validation</button>}
+          </div>;
+        })}
+        {arT.length===0&&<div style={{textAlign:'center',padding:40,color:C.muted,fontSize:14}}>Aucune tâche active 🎉</div>}
+      </div>}
+
+      {selT&&tache&&(()=>{
+        const ch=chantiers.find(c=>c.id===tache.chantierId);const st=STATUTS[getStatut(tache)];
+        return <div style={{padding:16}}>
+          <div style={{background:st.bg,border:`1px solid ${st.color}44`,borderRadius:12,padding:'12px 16px',marginBottom:16,textAlign:'center'}}><div style={{fontSize:16,fontWeight:700,color:st.color,fontFamily:H}}>{st.label}</div></div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
+            {[['Chantier',ch?.nom?.split('–')[0]?.trim()||'—'],['Section',tache.section],['Dates',`${fmtDate(tache.dateDebut)} → ${fmtDate(tache.dateFin)}`],['Durée',`${tache.duree}j`]].map(([l,v],i)=>(
+              <div key={i} style={{background:C.surface,borderRadius:10,padding:'10px 12px'}}><div style={{fontSize:9,color:C.muted,textTransform:'uppercase',letterSpacing:1,fontFamily:H}}>{l}</div><div style={{fontSize:12,color:C.text,marginTop:3,fontWeight:600}}>{v}</div></div>
+            ))}
+          </div>
+          {tache.description&&<div style={{background:C.surface,borderRadius:10,padding:'12px 14px',fontSize:13,color:C.secondary,marginBottom:14}}>{tache.description}</div>}
+          <div style={{display:'flex',flexDirection:'column',gap:10,marginBottom:18}}>
+            {getStatut(tache)==='planifie'&&<button onClick={()=>updateStatut(tache,'en_cours')} style={{padding:14,background:C.blue,color:'#fff',border:'none',borderRadius:12,fontSize:15,fontWeight:700,cursor:'pointer',fontFamily:H}}>▶ Démarrer</button>}
+            {getStatut(tache)==='en_cours'&&<button onClick={()=>updateStatut(tache,'en_attente')} style={{padding:14,background:C.green,color:'#fff',border:'none',borderRadius:12,fontSize:15,fontWeight:700,cursor:'pointer',fontFamily:H}}>✓ Terminé — demander validation</button>}
+            {getStatut(tache)==='refuse'&&<button onClick={()=>updateStatut(tache,'en_cours')} style={{padding:14,background:C.accent,color:'#000',border:'none',borderRadius:12,fontSize:15,fontWeight:700,cursor:'pointer',fontFamily:H}}>↩ Reprendre les travaux</button>}
+          </div>
+          {tache.achats.length>0&&<div style={{marginBottom:16}}>
+            <div style={{fontSize:10,color:C.secondary,textTransform:'uppercase',letterSpacing:1,fontFamily:H,marginBottom:8}}>Matériaux</div>
+            {tache.achats.map(a=>{const ast=ACHAT_ST[a.statut];return <div key={a.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:`1px solid ${C.border}`}}><span style={{fontSize:13,color:C.text}}>{a.libelle}</span><Badge label={ast.label} color={ast.color}/></div>;})}
+          </div>}
+          <div>
+            <div style={{fontSize:10,color:C.secondary,textTransform:'uppercase',letterSpacing:1,fontFamily:H,marginBottom:8}}>Messages</div>
+            {tache.commentaires.map((c,i)=><div key={i} style={{background:C.surface,borderRadius:10,padding:'10px 12px',marginBottom:6,fontSize:13,color:C.text}}>{c}</div>)}
+            <div style={{display:'flex',gap:8,marginTop:8}}>
+              <input value={nc} onChange={e=>setNc(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addComment()} placeholder="Votre message…" style={{flex:1,background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:'10px 14px',color:C.text,fontSize:14,fontFamily:F,outline:'none'}}/>
+              <button onClick={addComment} style={{background:C.accent,border:'none',borderRadius:10,padding:'0 16px',color:'#000',fontSize:18,cursor:'pointer'}}>↑</button>
+            </div>
+          </div>
+        </div>;
+      })()}
+    </div>
+  </div>;
+}
+
+/* ── Chantier Detail ──────────────────────────────────────────── */
+function ChantierDetail({chantier,artisans,allBons,onBack,onRefresh,onNewBon,allTaches}){
+  const [raw,setRaw]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [tab,setTab]=useState('taches');
+  const [selT,setSelT]=useState(null);
+  const [showAddT,setShowAddT]=useState(false);
+  const [showImport,setShowImport]=useState(false);
+
+  const load=useCallback(async()=>{
+    setLoading(true);
+    const data=await DB.getChantierDetail(chantier.id);
+    setRaw(data);
+    setLoading(false);
+  },[chantier.id]);
+
+  useEffect(()=>{load();},[load]);
+
+  const taches=raw?normalizeTaches(raw,chantier.id):[];
+  const sections=raw?.sections||[];
+  const chBons=allBons.filter(b=>b.chantier_id===chantier.id);
+  const pendingVal=taches.filter(t=>t.statut==='en_attente').length;
+  const pendingAch=taches.flatMap(t=>t.achats).filter(a=>a.statut==='a_acheter').length;
+
+  const onTacheSaved=()=>load();
+
+  return <div style={{display:'flex',flexDirection:'column',gap:16,animation:'fadeIn .2s'}}>
+    <div style={{display:'flex',alignItems:'center',gap:12}}>
+      <Btn onClick={onBack} variant="ghost" small>← Retour</Btn>
+      <div style={{flex:1}}><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Chantier</p><h1 style={{fontSize:20,fontWeight:800,color:C.text,fontFamily:H,margin:'2px 0 0'}}>{chantier.nom}</h1></div>
+      <Badge label={`${chantier.avancement||0}%`} color={C.accent}/>
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10}}>
+      {[{l:'Client',v:chantier.client||'—'},{l:'Adresse',v:chantier.adresse||'—',s:true},{l:'Dates',v:`${fmtDate(chantier.date_debut)} → ${fmtDate(chantier.date_fin)}`},{l:'Budget',v:fmtMoney(chantier.budget),a:true}].map((m,i)=>(
+        <Card key={i} style={{padding:12}}><div style={{fontSize:9,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1,marginBottom:3}}>{m.l}</div><div style={{fontSize:m.s?11:13,fontWeight:600,color:m.a?C.accent:C.text,fontFamily:F}}>{m.v}</div></Card>
+      ))}
+    </div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:`1px solid ${C.border}`}}>
+      <div style={{display:'flex',gap:2}}>
+        {[['taches','☑ Tâches'],['planning','📅 Planning'],['achats',`📦 Achats${pendingAch>0?` (${pendingAch})`:''}`],['bons',`📋 BdC${chBons.length>0?` (${chBons.length})`:''}`]].map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{padding:'8px 14px',fontSize:13,fontWeight:600,fontFamily:F,background:'none',border:'none',cursor:'pointer',borderBottom:tab===id?`2px solid ${C.accent}`:'2px solid transparent',color:tab===id?C.accent:C.secondary,marginBottom:-1}}>{label}</button>
+        ))}
+      </div>
+      <div style={{display:'flex',gap:7,paddingBottom:8}}>
+        {tab==='taches'&&<><Btn small variant="subtle" onClick={()=>setShowImport(true)}>📄 Importer devis</Btn><Btn small variant="primary" onClick={()=>setShowAddT(true)}>＋ Tâche</Btn></>}
+        {tab==='bons'&&<Btn small variant="primary" onClick={()=>onNewBon(chantier.id,null)}>＋ Bon de commande</Btn>}
+      </div>
+    </div>
+
+    {loading&&<div style={{padding:40,textAlign:'center'}}><Spinner/></div>}
+
+    {!loading&&tab==='taches'&&<div style={{display:'flex',flexDirection:'column',gap:14}}>
+      {pendingVal>0&&<div style={{background:`${C.accent}10`,border:`1px solid ${C.accent}33`,borderRadius:10,padding:'10px 14px',fontSize:12,color:C.accent,fontFamily:F}}>⏳ {pendingVal} tâche{pendingVal>1?'s':''} en attente de validation</div>}
+      {[...new Set(taches.map(t=>t.section))].map(sec=>(
+        <div key={sec}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}><div style={{width:3,height:15,background:C.accent,borderRadius:2}}/><h3 style={{fontSize:11,fontWeight:700,color:C.text,fontFamily:H,textTransform:'uppercase',letterSpacing:1,margin:0}}>{sec}</h3><span style={{fontSize:11,color:C.muted,fontFamily:F}}>({taches.filter(t=>t.section===sec).length})</span></div>
+          <div style={{display:'flex',flexDirection:'column',gap:7}}>
+            {taches.filter(t=>t.section===sec).map(t=>{
+              const ar=artisans.find(a=>a.id===t.artisanId);const st=STATUTS[t.statut];
+              return <Card key={t.id} onClick={()=>setSelT(t)} hover style={{padding:'11px 14px'}}>
+                <div style={{display:'flex',alignItems:'center',gap:10}}>
+                  {ar?<Av code={ar.avatar} color={ar.color} size={28}/>:<div style={{width:28,height:28,borderRadius:'50%',background:C.border,flexShrink:0}}/>}
+                  <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:C.text,fontFamily:F}}>{t.titre}</div><div style={{fontSize:11,color:C.muted,marginTop:1,fontFamily:F}}>{ar?.nom||'Non assigné'} · {fmtDate(t.dateDebut)}→{fmtDate(t.dateFin)} · {t.duree}j</div></div>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}>
+                    {t.achats.length>0&&<Badge label={`📦${t.achats.length}`} color={C.secondary}/>}
+                    {t.commentaires.length>0&&<Badge label={`💬${t.commentaires.length}`} color={C.secondary}/>}
+                    <Badge label={st.label} color={st.color} bg={st.bg}/>
+                  </div>
+                </div>
+              </Card>;
+            })}
+          </div>
+        </div>
+      ))}
+      {taches.length===0&&<div style={{textAlign:'center',padding:'36px 20px',color:C.muted,fontFamily:F}}>
+        <div style={{fontSize:34,marginBottom:10}}>📋</div>
+        <div style={{fontSize:14,marginBottom:12}}>Aucune tâche sur ce chantier</div>
+        <div style={{display:'flex',gap:10,justifyContent:'center'}}>
+          <Btn onClick={()=>setShowImport(true)} variant="subtle">📄 Importer un devis</Btn>
+          <Btn onClick={()=>setShowAddT(true)} variant="primary">＋ Créer une tâche</Btn>
+        </div>
+      </div>}
+    </div>}
+
+    {!loading&&tab==='planning'&&<Gantt taches={taches} artisans={artisans}/>}
+
+    {!loading&&tab==='achats'&&<div style={{display:'flex',flexDirection:'column',gap:7}}>
+      {taches.flatMap(t=>t.achats.map(a=>({...a,tache:t}))).length===0&&<div style={{color:C.muted,fontFamily:F,padding:16,fontSize:13}}>Aucun achat renseigné.</div>}
+      {taches.flatMap(t=>t.achats.map(a=>({...a,tache:t}))).map(({tache,...a})=>{
+        const ast=ACHAT_ST[a.statut];
+        const updateSt=async(newSt)=>{await DB.updateAchatStatut(a.id,newSt);load();};
+        return <Card key={a.id} style={{padding:'11px 14px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <div style={{width:8,height:8,borderRadius:'50%',background:ast.color,flexShrink:0}}/>
+            <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:C.text,fontFamily:F}}>{a.libelle}</div><div style={{fontSize:11,color:C.muted,marginTop:1,fontFamily:F}}>→ {tache.titre}</div></div>
+            <select value={a.statut} onChange={e=>updateSt(e.target.value)} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:'5px 9px',color:ast.color,fontSize:12,fontFamily:F,cursor:'pointer',outline:'none'}}>
+              {Object.entries(ACHAT_ST).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </div>
+        </Card>;
+      })}
+    </div>}
+
+    {!loading&&tab==='bons'&&<div style={{display:'flex',flexDirection:'column',gap:8}}>
+      {chBons.length===0&&<div style={{color:C.muted,fontFamily:F,padding:16,fontSize:13}}>Aucun bon de commande émis.</div>}
+      {chBons.map(b=>{const ar=artisans.find(a=>a.id===b.intervenant_id);return <Card key={b.id} style={{padding:'12px 16px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:12}}>
+          {ar&&<Av code={ar.avatar} color={ar.color} size={32}/>}
+          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:C.text,fontFamily:H}}>{b.num}</div><div style={{fontSize:11,color:C.secondary,fontFamily:F,marginTop:2}}>{ar?.nom}{b.date_butoir?` · butoir ${fmtDate(b.date_butoir)}`:''}</div></div>
+          <Badge label={new Date(b.created_at).toLocaleDateString('fr-FR')} color={C.secondary}/>
+        </div>
+      </Card>;})}
+    </div>}
+
+    {selT&&<TacheModal tache={selT} artisans={artisans} sections={sections} onClose={()=>setSelT(null)} onSaved={onTacheSaved}/>}
+    {showAddT&&<AddTacheModal chantierId={chantier.id} artisans={artisans} existingSections={sections} onSaved={()=>{load();setShowAddT(false);}} onClose={()=>setShowAddT(false)}/>}
+    {showImport&&<ImportDevisModal chantierId={chantier.id} chantierNom={chantier.nom.split('–')[0].trim()} artisans={artisans} existingSections={sections} onSaved={()=>{load();setShowImport(false);}} onClose={()=>setShowImport(false)}/>}
+  </div>;
+}
+
+/* ── Chantiers List ───────────────────────────────────────────── */
+function ChantiersList({chantiers,allTaches,onSelect,onNew,loading}){
+  return <div style={{display:'flex',flexDirection:'column',gap:22,animation:'fadeIn .2s'}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Projets</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Chantiers</h1></div>
+      <Btn variant="primary" onClick={onNew}>＋ Nouveau chantier</Btn>
+    </div>
+    {loading&&<div style={{padding:40,textAlign:'center'}}><Spinner/></div>}
+    {!loading&&<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(290px,1fr))',gap:14}}>
+      {chantiers.map(c=>{
+        const ct=allTaches.filter(t=>t.chantierId===c.id);
+        return <Card key={c.id} onClick={()=>onSelect(c.id)} hover style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}><div style={{fontSize:13,fontWeight:700,color:C.text,fontFamily:H,lineHeight:1.3,flex:1,marginRight:8}}>{c.nom}</div><Badge label={c.statut==='en_cours'?'En cours':c.statut==='planifie'?'Planifié':'Terminé'} color={c.statut==='en_cours'?C.blue:C.secondary}/></div>
+          <div style={{fontSize:11,color:C.secondary,fontFamily:F}}>{c.adresse}</div>
+          <div style={{display:'flex',gap:14}}>
+            <div><div style={{fontSize:9,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1}}>Client</div><div style={{fontSize:12,color:C.text,fontFamily:F}}>{c.client||'—'}</div></div>
+            <div><div style={{fontSize:9,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1}}>Budget</div><div style={{fontSize:12,color:C.accent,fontFamily:F,fontWeight:700}}>{fmtMoney(c.budget)}</div></div>
+            <div><div style={{fontSize:9,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1}}>Livraison</div><div style={{fontSize:12,color:C.text,fontFamily:F}}>{fmtDate(c.date_fin)}</div></div>
+          </div>
+          <div><div style={{display:'flex',justifyContent:'space-between',marginBottom:5}}><span style={{fontSize:11,color:C.secondary,fontFamily:F}}>Avancement</span><span style={{fontSize:11,fontWeight:700,color:C.accent,fontFamily:H}}>{c.avancement||0}%</span></div><Prog value={c.avancement||0}/></div>
+          <div style={{fontSize:11,color:C.muted,fontFamily:F}}>{ct.filter(t=>t.statut==='valide').length}/{ct.length} tâches validées{ct.filter(t=>t.statut==='en_attente').length>0?<span style={{color:C.accent}}> · ⏳{ct.filter(t=>t.statut==='en_attente').length} validation</span>:''}</div>
+        </Card>;
+      })}
+      {chantiers.length===0&&<div style={{gridColumn:'1/-1',textAlign:'center',padding:'50px 20px',color:C.muted,fontFamily:F}}><div style={{fontSize:36,marginBottom:12}}>🏗</div><div style={{fontSize:14,marginBottom:12}}>Aucun chantier</div><Btn onClick={onNew} variant="primary">＋ Créer mon premier chantier</Btn></div>}
+    </div>}
+  </div>;
+}
+
+/* ── New Chantier Form ────────────────────────────────────────── */
+function NewChantierForm({onSaved,onCancel}){
+  const [f,setF]=useState({nom:'',adresse:'',client:'',dateDebut:'',dateFin:'',budget:''});
+  const [saving,setSaving]=useState(false);
+  const u=(k,v)=>setF(p=>({...p,[k]:v}));
+  const save=async()=>{
+    if(!f.nom.trim()) return;
+    setSaving(true);
+    try{await DB.createChantier(f);onSaved();}
+    catch(e){alert('Erreur: '+e.message);}
+    setSaving(false);
+  };
+  return <div style={{display:'flex',flexDirection:'column',gap:20,animation:'fadeIn .2s'}}>
+    <div style={{display:'flex',alignItems:'center',gap:12}}><Btn onClick={onCancel} variant="ghost" small>← Retour</Btn><h1 style={{fontSize:22,fontWeight:800,color:C.text,fontFamily:H,margin:0}}>Nouveau chantier</h1></div>
+    <Card style={{maxWidth:560,display:'flex',flexDirection:'column',gap:14}}>
+      <FInput label="Nom du chantier" value={f.nom} onChange={e=>u('nom',e.target.value)} placeholder="ex: Villa Martin – Rénovation complète"/>
+      <FInput label="Adresse" value={f.adresse} onChange={e=>u('adresse',e.target.value)} placeholder="12 rue des Fleurs, 63000 Clermont-Fd"/>
+      <FInput label="Client" value={f.client} onChange={e=>u('client',e.target.value)} placeholder="Nom du client"/>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <FInput label="Début" type="date" value={f.dateDebut} onChange={e=>u('dateDebut',e.target.value)}/>
+        <FInput label="Fin prévue" type="date" value={f.dateFin} onChange={e=>u('dateFin',e.target.value)}/>
+      </div>
+      <FInput label="Budget (€)" type="number" value={f.budget} onChange={e=>u('budget',e.target.value)} placeholder="50000"/>
+      <div style={{display:'flex',gap:8,justifyContent:'flex-end',paddingTop:6,borderTop:`1px solid ${C.border}`}}>
+        <Btn onClick={onCancel} variant="ghost">Annuler</Btn>
+        <Btn onClick={save} variant="primary" loading={saving}>Créer</Btn>
+      </div>
+    </Card>
+  </div>;
+}
+
+/* ── Dashboard ────────────────────────────────────────────────── */
+function Dashboard({chantiers,allTaches,artisans,loading,onGoTo}){
+  const kpis=[
+    {l:'Chantiers actifs',v:chantiers.filter(c=>c.statut==='en_cours').length,color:C.blue,icon:'🏗',fn:()=>onGoTo('chantiers')},
+    {l:'Tâches en cours',v:allTaches.filter(t=>t.statut==='en_cours').length,color:C.purple,icon:'⚙️',fn:()=>onGoTo('taches')},
+    {l:'En validation',v:allTaches.filter(t=>t.statut==='en_attente').length,color:C.accent,icon:'⏳',fn:()=>onGoTo('taches')},
+    {l:'Achats à lancer',v:allTaches.flatMap(t=>t.achats).filter(a=>a.statut==='a_acheter').length,color:C.red,icon:'🛒',fn:()=>onGoTo('achats')},
+  ];
+  const recent=allTaches.filter(t=>['en_cours','en_attente'].includes(t.statut)).slice(0,5);
+  return <div style={{display:'flex',flexDirection:'column',gap:24,animation:'fadeIn .2s'}}>
+    <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Tableau de bord</p><h1 style={{fontSize:26,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Bonjour Louis 👋</h1></div>
+    {loading?<div style={{padding:40,textAlign:'center'}}><Spinner/></div>:<>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12}}>
+        {kpis.map((k,i)=><Card key={i} onClick={k.fn} hover style={{display:'flex',alignItems:'center',gap:14,padding:16}}><div style={{fontSize:26}}>{k.icon}</div><div><div style={{fontSize:26,fontWeight:800,color:k.color,fontFamily:H,lineHeight:1}}>{k.v}</div><div style={{fontSize:12,color:C.secondary,marginTop:3,fontFamily:F}}>{k.l}</div></div></Card>)}
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:18}}>
+        <div>
+          <h2 style={{fontSize:13,fontWeight:700,color:C.text,fontFamily:H,marginBottom:10}}>Chantiers en cours</h2>
+          {chantiers.filter(c=>c.statut==='en_cours').map(c=>(
+            <Card key={c.id} onClick={()=>onGoTo('chantiers',c.id)} hover style={{marginBottom:10,padding:14}}>
+              <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}><div style={{fontSize:12,fontWeight:600,color:C.text,fontFamily:F}}>{c.nom.split('–')[0]}</div><Badge label={`${c.avancement||0}%`} color={C.accent}/></div>
+              <Prog value={c.avancement||0}/>
+              <div style={{fontSize:11,color:C.muted,marginTop:5,fontFamily:F}}>{fmtDate(c.date_fin)} · {c.client}</div>
+            </Card>
+          ))}
+          {chantiers.filter(c=>c.statut==='en_cours').length===0&&<div style={{color:C.muted,fontSize:13,fontFamily:F,padding:'20px 0'}}>Aucun chantier actif</div>}
+        </div>
+        <div>
+          <h2 style={{fontSize:13,fontWeight:700,color:C.text,fontFamily:H,marginBottom:10}}>Tâches actives</h2>
+          {recent.map(t=>{const ch=chantiers.find(c=>c.id===t.chantierId);const st=STATUTS[t.statut];return <Card key={t.id} style={{marginBottom:7,padding:12}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><div><div style={{fontSize:12,fontWeight:600,color:C.text,fontFamily:F}}>{t.titre}</div><div style={{fontSize:11,color:C.muted,marginTop:1,fontFamily:F}}>{ch?.nom?.split('–')[0]?.trim()}</div></div><Badge label={st.label} color={st.color} bg={st.bg}/></div></Card>;})}
+          {recent.length===0&&<div style={{color:C.muted,fontSize:13,fontFamily:F,padding:'20px 0'}}>Aucune tâche active</div>}
+        </div>
+      </div>
+    </>}
+  </div>;
+}
+
+/* ── Toutes les tâches ────────────────────────────────────────── */
+function ToutesLesTaches({allTaches,chantiers,artisans,loading,onRefresh}){
+  const [filter,setFilter]=useState('all');
+  const [selT,setSelT]=useState(null);
+  const filtered=allTaches.filter(t=>filter==='all'||t.statut===filter);
+  return <div style={{display:'flex',flexDirection:'column',gap:18,animation:'fadeIn .2s'}}>
+    <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Suivi terrain</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Toutes les tâches</h1></div>
+    <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+      <button onClick={()=>setFilter('all')} style={{padding:'5px 13px',borderRadius:99,fontSize:12,fontWeight:600,cursor:'pointer',background:filter==='all'?C.accent:'transparent',color:filter==='all'?'#000':C.secondary,border:`1px solid ${filter==='all'?C.accent:C.border}`,fontFamily:F}}>Toutes ({allTaches.length})</button>
+      {Object.entries(STATUTS).map(([k,v])=>{const n=allTaches.filter(t=>t.statut===k).length;return n>0&&<button key={k} onClick={()=>setFilter(k)} style={{padding:'5px 13px',borderRadius:99,fontSize:12,fontWeight:600,cursor:'pointer',background:filter===k?v.bg:'transparent',color:filter===k?v.color:C.secondary,border:`1px solid ${filter===k?v.color:C.border}`,fontFamily:F}}>{v.label} ({n})</button>;})}
+    </div>
+    {loading?<div style={{padding:40,textAlign:'center'}}><Spinner/></div>:<div style={{display:'flex',flexDirection:'column',gap:7}}>
+      {filtered.map(t=>{const ch=chantiers.find(c=>c.id===t.chantierId);const ar=artisans.find(a=>a.id===t.artisanId);const st=STATUTS[t.statut];return <Card key={t.id} onClick={()=>setSelT(t)} hover style={{padding:'11px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          {ar?<Av code={ar.avatar} color={ar.color} size={28}/>:<div style={{width:28,height:28,borderRadius:'50%',background:C.border,flexShrink:0}}/>}
+          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:C.text,fontFamily:F}}>{t.titre}</div><div style={{fontSize:11,color:C.muted,marginTop:1,fontFamily:F}}>{ch?.nom?.split('–')[0]?.trim()} · {t.section} · {fmtDate(t.dateDebut)}→{fmtDate(t.dateFin)}</div></div>
+          <div style={{display:'flex',gap:6,alignItems:'center'}}>{t.achats.filter(a=>a.statut==='a_acheter').length>0&&<Badge label={`🛒${t.achats.filter(a=>a.statut==='a_acheter').length}`} color={C.red}/>}<Badge label={st.label} color={st.color} bg={st.bg}/></div>
+        </div>
+      </Card>;})}
+      {filtered.length===0&&<div style={{textAlign:'center',padding:'40px 20px',color:C.muted,fontFamily:F}}>Aucune tâche dans cette catégorie</div>}
+    </div>}
+    {selT&&<TacheModal tache={selT} artisans={artisans} onClose={()=>setSelT(null)} onSaved={()=>{setSelT(null);onRefresh();}}/>}
+  </div>;
+}
+
+/* ── Artisans View ────────────────────────────────────────────── */
+function ArtisanView({artisans,allTaches,chantiers,loading,onRefresh,onNewBon}){
+  const [sel,setSel]=useState(null);
+  const [showAdd,setShowAdd]=useState(false);
+  const stats=artisans.map(a=>{const at=allTaches.filter(t=>t.artisanId===a.id);return{...a,total:at.length,ec:at.filter(t=>t.statut==='en_cours').length,ok:at.filter(t=>t.statut==='valide').length};});
+  const ar=sel?artisans.find(a=>a.id===sel):null;
+  return <div style={{display:'flex',flexDirection:'column',gap:20,animation:'fadeIn .2s'}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Équipe</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Artisans</h1></div>
+      <Btn variant="primary" onClick={()=>setShowAdd(true)}>＋ Ajouter un artisan</Btn>
+    </div>
+    {loading?<div style={{padding:40,textAlign:'center'}}><Spinner/></div>:<>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(210px,1fr))',gap:12}}>
+        {stats.map(a=><Card key={a.id} onClick={()=>setSel(sel===a.id?null:a.id)} hover style={{border:`1px solid ${sel===a.id?a.color+'55':C.border}`,background:sel===a.id?`${a.color}0a`:C.card}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}><Av code={a.avatar} color={a.color} size={38}/><div><div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H}}>{a.nom}</div><div style={{fontSize:12,color:C.secondary,fontFamily:F}}>{a.metier}</div></div></div>
+          <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
+            <Badge label={`${a.total} tâches`} color={C.secondary}/>
+            {a.ec>0&&<Badge label={`${a.ec} en cours`} color={C.blue} bg="rgba(59,130,246,.1)"/>}
+            {a.ok>0&&<Badge label={`${a.ok} validées`} color={C.green} bg="rgba(16,185,129,.1)"/>}
+          </div>
+          <div style={{fontSize:11,color:C.muted,marginTop:7,fontFamily:F}}>📞 {a.tel||'—'}</div>
+        </Card>)}
+        {artisans.length===0&&<div style={{gridColumn:'1/-1',textAlign:'center',padding:'50px 20px',color:C.muted,fontFamily:F}}><div style={{fontSize:36,marginBottom:12}}>👷</div><div style={{fontSize:14,marginBottom:12}}>Aucun artisan</div><Btn onClick={()=>setShowAdd(true)} variant="primary">＋ Ajouter un artisan</Btn></div>}
+      </div>
+      {ar&&<Card style={{border:`1px solid ${ar.color}33`}}>
+        <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:14}}>
+          <Av code={ar.avatar} color={ar.color} size={44}/>
+          <div style={{flex:1}}><h2 style={{fontSize:17,fontWeight:800,color:C.text,fontFamily:H,margin:0}}>{ar.nom}</h2><div style={{fontSize:13,color:C.secondary,fontFamily:F}}>{ar.metier}{ar.entreprise?` · ${ar.entreprise}`:''}{ar.tel?` · ${ar.tel}`:''}</div></div>
+          <Btn small variant="subtle" onClick={()=>onNewBon(null,ar.id)}>📋 Bon de commande</Btn>
+        </div>
+        <div style={{display:'flex',flexDirection:'column',gap:7}}>
+          {allTaches.filter(t=>t.artisanId===ar.id).map(t=>{const ch=chantiers.find(c=>c.id===t.chantierId);const st=STATUTS[t.statut];return <div key={t.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 12px',background:C.surface,borderRadius:10}}>
+            <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:C.text,fontFamily:F}}>{t.titre}</div><div style={{fontSize:11,color:C.muted,marginTop:1,fontFamily:F}}>{ch?.nom?.split('–')[0]?.trim()} · {fmtDate(t.dateDebut)}→{fmtDate(t.dateFin)}</div></div>
+            <Badge label={st.label} color={st.color} bg={st.bg}/>
+          </div>;})}
+          {allTaches.filter(t=>t.artisanId===ar.id).length===0&&<div style={{color:C.muted,fontSize:12,fontFamily:F,padding:8}}>Aucune tâche assignée.</div>}
+        </div>
+      </Card>}
+    </>}
+    {showAdd&&<AddArtisanModal onSaved={()=>{onRefresh();setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
+  </div>;
+}
+
+/* ── Achats Global ────────────────────────────────────────────── */
+function AchatsGlobal({allTaches,chantiers,loading,onRefresh}){
+  const [fst,setFst]=useState('all');
+  const all=allTaches.flatMap(t=>t.achats.map(a=>({...a,tache:t,ch:chantiers.find(c=>c.id===t.chantierId)})));
+  const filtered=all.filter(a=>fst==='all'||a.statut===fst);
+  const counts={}; Object.keys(ACHAT_ST).forEach(k=>{counts[k]=all.filter(a=>a.statut===k).length;});
+  const updateSt=async(id,statut)=>{await DB.updateAchatStatut(id,statut);onRefresh();};
+  return <div style={{display:'flex',flexDirection:'column',gap:18,animation:'fadeIn .2s'}}>
+    <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Approvisionnement</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Gestion des achats</h1></div>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10}}>
+      {Object.entries(ACHAT_ST).map(([k,v])=><Card key={k} onClick={()=>setFst(fst===k?'all':k)} hover style={{padding:14,border:`1px solid ${fst===k?v.color+'55':C.border}`,cursor:'pointer'}}>
+        <div style={{fontSize:24,fontWeight:800,color:v.color,fontFamily:H}}>{counts[k]||0}</div>
+        <div style={{fontSize:12,color:C.secondary,marginTop:2,fontFamily:F}}>{v.label}</div>
+      </Card>)}
+    </div>
+    {loading?<div style={{padding:40,textAlign:'center'}}><Spinner/></div>:<div style={{display:'flex',flexDirection:'column',gap:7}}>
+      {filtered.length===0&&<div style={{color:C.muted,fontFamily:F,padding:16,fontSize:13}}>Aucun achat dans cette catégorie.</div>}
+      {filtered.map(({tache,ch,...a})=>{const ast=ACHAT_ST[a.statut];return <Card key={a.id} style={{padding:'11px 14px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:8,height:8,borderRadius:'50%',background:ast.color,flexShrink:0}}/>
+          <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:C.text,fontFamily:F}}>{a.libelle}</div><div style={{fontSize:11,color:C.muted,marginTop:1,fontFamily:F}}>{ch?.nom?.split('–')[0]?.trim()} · {tache.titre}</div></div>
+          <select value={a.statut} onChange={e=>updateSt(a.id,e.target.value)} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:'5px 9px',color:ast.color,fontSize:12,fontFamily:F,cursor:'pointer',outline:'none'}}>
+            {Object.entries(ACHAT_ST).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+          </select>
+        </div>
+      </Card>;})}
+    </div>}
+  </div>;
+}
+
+/* ── Bons View ────────────────────────────────────────────────── */
+function BonsView({bons,artisans,chantiers,loading,onNew}){
+  return <div style={{display:'flex',flexDirection:'column',gap:18,animation:'fadeIn .2s'}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Commandes</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Bons de commande</h1></div>
+      <Btn variant="primary" onClick={()=>onNew(null,null)}>＋ Nouveau bon</Btn>
+    </div>
+    {loading?<div style={{padding:40,textAlign:'center'}}><Spinner/></div>:<>
+      {bons.length===0&&<div style={{textAlign:'center',padding:'50px 20px',color:C.muted,fontFamily:F}}><div style={{fontSize:36,marginBottom:12}}>📋</div><div style={{fontSize:14,marginBottom:12}}>Aucun bon de commande</div><Btn onClick={()=>onNew(null,null)} variant="primary">Créer un bon de commande</Btn></div>}
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        {bons.map(b=>{const ar=artisans.find(a=>a.id===b.intervenant_id);const ch=chantiers.find(c=>c.id===b.chantier_id);return <Card key={b.id} style={{padding:'14px 16px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:14}}>
+            {ar&&<Av code={ar.avatar} color={ar.color} size={36}/>}
+            <div style={{flex:1}}><div style={{fontSize:14,fontWeight:700,color:C.text,fontFamily:H}}>{b.num}</div><div style={{fontSize:12,color:C.secondary,fontFamily:F,marginTop:2}}>{ar?.nom} · {ch?.nom?.split('–')[0]?.trim()}</div><div style={{fontSize:11,color:C.muted,marginTop:2,fontFamily:F}}>{b.bons_taches?.length||0} tâche{(b.bons_taches?.length||0)>1?'s':''}{b.date_butoir?` · Butoir : ${fmtDate(b.date_butoir)}`:''}</div></div>
+            <Badge label={new Date(b.created_at).toLocaleDateString('fr-FR')} color={C.secondary}/>
+          </div>
+        </Card>;})}
+      </div>
+    </>}
+  </div>;
+}
+
+/* ── Planning Global ──────────────────────────────────────────── */
+function PlanningGlobal({allTaches,chantiers,artisans,loading}){
+  const [grp,setGrp]=useState('chantier');
+  if(loading) return <div style={{padding:40,textAlign:'center'}}><Spinner/></div>;
+  const valid=allTaches.filter(t=>t.dateDebut&&t.dateFin);
+  if(!valid.length) return <div style={{display:'flex',flexDirection:'column',gap:18}}><div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Vue globale</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Planning</h1></div><div style={{color:C.muted,fontFamily:F,padding:20}}>Aucune tâche avec dates planifiées.</div></div>;
+  const allD=valid.flatMap(t=>[new Date(t.dateDebut),new Date(t.dateFin)]);
+  const minD=new Date(Math.min(...allD)); minD.setDate(minD.getDate()-2);
+  const maxD=new Date(Math.max(...allD)); maxD.setDate(maxD.getDate()+5);
+  const total=Math.ceil((maxD-minD)/864e5)||1;
+  const xp=d=>((new Date(d)-minD)/864e5/total)*100;
+  const wp=(d1,d2)=>Math.max(((new Date(d2)-new Date(d1))/864e5/total)*100,1.5);
+  const wks=[]; const wd=new Date(minD); while(wd<=maxD){wks.push(new Date(wd));wd.setDate(wd.getDate()+7);}
+  const bc={planifie:C.secondary,en_cours:C.blue,en_attente:C.accent,valide:C.green,refuse:C.red};
+  const groups=grp==='chantier'?chantiers.map(c=>({label:c.nom.split('–')[0].trim(),items:valid.filter(t=>t.chantierId===c.id),color:C.blue})):artisans.map(a=>({label:a.nom,items:valid.filter(t=>t.artisanId===a.id),color:a.color}));
+  return <div style={{display:'flex',flexDirection:'column',gap:18,animation:'fadeIn .2s'}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end'}}>
+      <div><p style={{fontSize:10,color:C.secondary,fontFamily:H,textTransform:'uppercase',letterSpacing:2,margin:0}}>Vue globale</p><h1 style={{fontSize:24,fontWeight:800,color:C.text,fontFamily:H,margin:'4px 0 0'}}>Planning</h1></div>
+      <div style={{display:'flex',gap:6}}>{[['chantier','Par chantier'],['artisan','Par artisan']].map(([v,l])=><Btn key={v} onClick={()=>setGrp(v)} variant={grp===v?'primary':'ghost'} small>{l}</Btn>)}</div>
+    </div>
+    <Card style={{padding:0,overflow:'hidden'}}>
+      <div style={{display:'grid',gridTemplateColumns:'175px 1fr',borderBottom:`1px solid ${C.border}`}}>
+        <div style={{padding:'10px 14px',borderRight:`1px solid ${C.border}`,fontSize:10,color:C.muted,fontFamily:H,textTransform:'uppercase',letterSpacing:1}}>Groupe</div>
+        <div style={{position:'relative',height:30}}>
+          {wks.map((w,i)=><div key={i} style={{position:'absolute',left:`${xp(w)}%`,top:0,height:'100%',borderLeft:`1px dashed ${C.border}`,paddingLeft:3,display:'flex',alignItems:'center'}}><span style={{fontSize:9,color:C.muted,fontFamily:F,whiteSpace:'nowrap'}}>{w.toLocaleDateString('fr-FR',{day:'2-digit',month:'short'})}</span></div>)}
+          {(()=>{const p=xp(new Date());return(p>0&&p<100)&&<div style={{position:'absolute',left:`${p}%`,top:0,height:'100%',borderLeft:`2px solid ${C.red}`,zIndex:2}}><div style={{background:C.red,color:'#fff',fontSize:8,padding:'0 3px',borderRadius:'0 3px 3px 0',fontFamily:F,lineHeight:'14px',whiteSpace:'nowrap'}}>Auj.</div></div>;})()}
+        </div>
+      </div>
+      {groups.filter(g=>g.items.length).map((gg,gi)=><div key={gi}>
+        <div style={{display:'grid',gridTemplateColumns:'175px 1fr',background:C.surface,borderBottom:`1px solid ${C.border}`}}><div style={{padding:'6px 14px',borderRight:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:7}}><div style={{width:8,height:8,borderRadius:'50%',background:gg.color}}/><span style={{fontSize:12,fontWeight:700,color:C.text,fontFamily:H}}>{gg.label}</span></div><div style={{height:26}}/></div>
+        {gg.items.map(t=>{const ar=artisans.find(a=>a.id===t.artisanId);const px=xp(t.dateDebut),pw=wp(t.dateDebut,t.dateFin);return <div key={t.id} style={{display:'grid',gridTemplateColumns:'175px 1fr',borderBottom:`1px solid ${C.border}`}}>
+          <div style={{padding:'5px 14px',borderRight:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:6}}>{ar&&<Av code={ar.avatar} color={ar.color} size={18}/>}<span style={{fontSize:11,color:C.secondary,fontFamily:F,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.titre}</span></div>
+          <div style={{position:'relative',height:28}}><div title={`${t.titre} — ${t.duree}j`} style={{position:'absolute',top:'20%',left:`${px}%`,width:`${pw}%`,height:'60%',background:bc[t.statut]||C.secondary,borderRadius:4,opacity:.8,paddingLeft:5,display:'flex',alignItems:'center'}}><span style={{fontSize:9,color:'#fff',fontFamily:F,whiteSpace:'nowrap',overflow:'hidden'}}>{t.section}</span></div></div>
+        </div>;})}
+      </div>)}
+    </Card>
+    <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>{Object.entries(STATUTS).map(([k,v])=><div key={k} style={{display:'flex',alignItems:'center',gap:5}}><div style={{width:10,height:10,borderRadius:2,background:bc[k]}}/><span style={{fontSize:11,color:C.secondary,fontFamily:F}}>{v.label}</span></div>)}</div>
+  </div>;
+}
+
+/* ══ ROOT APP ══════════════════════════════════════════════════ */
+function App(){
+  const [chantiers,setChantiers]=useState([]);
+  const [artisans,setArtisans]=useState([]);
+  const [bons,setBons]=useState([]);
+  const [allTaches,setAllTaches]=useState([]); // flat list for dashboard/planning
+  const [loading,setLoading]=useState(true);
+  const [view,setView]=useState('dashboard');
+  const [selCh,setSelCh]=useState(null);
+  const [newCh,setNewCh]=useState(false);
+  const [showMobile,setShowMobile]=useState(false);
+  const [showBon,setShowBon]=useState(false);
+  const [bonCh,setBonCh]=useState(null);
+  const [bonAr,setBonAr]=useState(null);
+  const [toast,setToast]=useState(null);
+
+  const showToast=(msg,type='success')=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
+
+  const loadAll=useCallback(async()=>{
+    setLoading(true);
+    try{
+      const [ch,ar,bn]=await Promise.all([DB.listChantiers(),DB.listIntervenants(),DB.listBons()]);
+      setChantiers(ch);
+      setArtisans(normalizeArtisans(ar));
+      setBons(bn);
+      // Load all taches for dashboard overview
+      const allRaw=await Promise.all(ch.map(c=>DB.getChantierDetail(c.id)));
+      const flat=allRaw.flatMap((raw,i)=>normalizeTaches(raw,ch[i].id));
+      setAllTaches(flat);
+    }catch(e){showToast('Erreur de chargement: '+e.message,'error');}
+    setLoading(false);
+  },[]);
+
+  useEffect(()=>{loadAll();},[loadAll]);
+
+  const goTo=(v,cid=null)=>{setView(v);if(cid)setSelCh(cid);setNewCh(false);};
+  const openBon=(chId,arId)=>{setBonCh(chId);setBonAr(arId);setShowBon(true);};
+
+  const nav=[
+    {id:'dashboard',label:'Tableau de bord',icon:'⬛'},
+    {id:'chantiers',label:'Chantiers',icon:'🏗'},
+    {id:'planning',label:'Planning',icon:'📅'},
+    {id:'taches',label:'Tâches',icon:'☑'},
+    {id:'artisans',label:'Artisans',icon:'👷'},
+    {id:'achats',label:'Achats',icon:'📦'},
+    {id:'bons',label:'Bons de commande',icon:'📋'},
+  ];
+  const badges={
+    taches:allTaches.filter(t=>t.statut==='en_attente').length,
+    achats:allTaches.flatMap(t=>t.achats).filter(a=>a.statut==='a_acheter').length,
+    bons:bons.length,
+  };
+
+  return <div style={{display:'flex',height:'100vh',background:C.bg,fontFamily:F,overflow:'hidden'}}>
+    {/* SIDEBAR */}
+    <nav style={{width:215,background:C.surface,borderRight:`1px solid ${C.border}`,display:'flex',flexDirection:'column',flexShrink:0}}>
+      <div style={{padding:'20px 16px 14px',borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:10}}>
+        <div style={{width:32,height:32,borderRadius:9,background:C.accent,display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}}>🏗</div>
+        <div><div style={{fontSize:15,fontWeight:800,color:C.text,fontFamily:H,lineHeight:1}}>Chantier</div><div style={{fontSize:9,color:C.accent,fontFamily:H,textTransform:'uppercase',letterSpacing:2,marginTop:1}}>Pro</div></div>
+      </div>
+      <div style={{flex:1,padding:'10px 8px',display:'flex',flexDirection:'column',gap:1,overflowY:'auto'}}>
+        {nav.map(n=>{const active=view===n.id;const badge=badges[n.id];return <button key={n.id} onClick={()=>goTo(n.id)} style={{display:'flex',alignItems:'center',gap:9,padding:'9px 11px',borderRadius:10,background:active?`${C.accent}18`:'transparent',border:active?`1px solid ${C.accent}33`:'1px solid transparent',cursor:'pointer',textAlign:'left',width:'100%'}}>
+          <span style={{fontSize:14,lineHeight:1}}>{n.icon}</span>
+          <span style={{flex:1,fontSize:13,fontWeight:active?700:500,color:active?C.accent:C.secondary,fontFamily:F}}>{n.label}</span>
+          {badge>0&&<Pill n={badge} color={n.id==='achats'?C.red:n.id==='bons'?C.green:C.accent}/>}
+        </button>;})}
+      </div>
+      <div style={{padding:'8px 10px',borderTop:`1px solid ${C.border}`}}>
+        <button onClick={()=>setShowMobile(true)} style={{width:'100%',display:'flex',alignItems:'center',gap:8,padding:'9px 12px',borderRadius:10,background:`${C.purple}18`,border:`1px solid ${C.purple}33`,cursor:'pointer'}}>
+          <span style={{fontSize:14}}>📱</span>
+          <span style={{fontSize:12,fontWeight:600,color:C.purple,fontFamily:F}}>Vue artisan mobile</span>
+        </button>
+      </div>
+      <div style={{padding:'10px 14px',borderTop:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:8}}>
+        <div style={{width:28,height:28,borderRadius:'50%',background:`${C.accent}22`,border:`1.5px solid ${C.accent}44`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:C.accent,fontFamily:H}}>LC</div>
+        <div><div style={{fontSize:12,fontWeight:600,color:C.text,fontFamily:F}}>Louis</div><div style={{fontSize:10,color:C.muted,fontFamily:F}}>Administrateur</div></div>
+      </div>
+    </nav>
+
+    {/* MAIN */}
+    <main style={{flex:1,overflowY:'auto',padding:'26px 30px'}}>
+      {view==='dashboard'&&<Dashboard chantiers={chantiers} allTaches={allTaches} artisans={artisans} loading={loading} onGoTo={goTo}/>}
+      {view==='chantiers'&&!newCh&&!selCh&&<ChantiersList chantiers={chantiers} allTaches={allTaches} onSelect={id=>setSelCh(id)} onNew={()=>setNewCh(true)} loading={loading}/>}
+      {view==='chantiers'&&newCh&&<NewChantierForm onSaved={()=>{loadAll();setNewCh(false);showToast('Chantier créé ✓');}} onCancel={()=>setNewCh(false)}/>}
+      {view==='chantiers'&&selCh&&!newCh&&(()=>{const ch=chantiers.find(c=>c.id===selCh);return ch?<ChantierDetail chantier={ch} artisans={artisans} allBons={bons} allTaches={allTaches} onBack={()=>setSelCh(null)} onRefresh={loadAll} onNewBon={openBon}/>:null;})()}
+      {view==='planning'&&<PlanningGlobal allTaches={allTaches} chantiers={chantiers} artisans={artisans} loading={loading}/>}
+      {view==='taches'&&<ToutesLesTaches allTaches={allTaches} chantiers={chantiers} artisans={artisans} loading={loading} onRefresh={loadAll}/>}
+      {view==='artisans'&&<ArtisanView artisans={artisans} allTaches={allTaches} chantiers={chantiers} loading={loading} onRefresh={loadAll} onNewBon={openBon}/>}
+      {view==='achats'&&<AchatsGlobal allTaches={allTaches} chantiers={chantiers} loading={loading} onRefresh={loadAll}/>}
+      {view==='bons'&&<BonsView bons={bons} artisans={artisans} chantiers={chantiers} loading={loading} onNew={openBon}/>}
+    </main>
+
+    {showMobile&&<MobileView artisans={artisans} taches={allTaches} chantiers={chantiers} onClose={()=>setShowMobile(false)}/>}
+    {showBon&&<BonCommandeModal chantiers={chantiers} artisans={artisans} allTaches={allTaches} prefillCh={bonCh} prefillAr={bonAr} onSaved={()=>{setBons([]);loadAll();showToast('Bon créé ✓');}} onClose={()=>setShowBon(false)}/>}
+    {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
